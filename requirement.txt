@@ -1,0 +1,14 @@
+bluefish               2.9.22
+google-cloud-translate 3.13.0
+grpcio-status          1.62.3
+Jinja2                 2.10.3
+langdetect             1.0.9
+lxmlx                  2.0.2
+Markdown               2.6.11
+pip                    23.2.1
+PyMuPDF                1.26.0
+PyQt5-Qt               5.15.2
+PyQtWebEngine          5.15.7
+PyQtWebEngine-Qt       5.15.2
+QScintilla             2.14.1
+wheel                  0.41.2
