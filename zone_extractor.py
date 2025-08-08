@@ -12,15 +12,10 @@ import fitz  # PyMuPDF
 from ultralytics import YOLO
 import supervision as sv
 import fitz
-from transformers import LayoutLMTokenizerFast, LayoutLMForTokenClassification
 import json
-import torch
-from typing import List, Dict, Any
-from collections import Counter
 from typing import Callable, List, Dict, Optional
 import logging
 from PyQt5.QtCore import QRunnable
-from izguts.dom_predictor import DomPredictor
 
 from configParser import config_parser
 
@@ -36,6 +31,7 @@ class ZoneExtractor:
         self.model_path = "D://yolo_detection//yolov11x_best.pt"
         self.conf_threshold = 0.2
         self.iou_threshold = 0.8
+
     def build_dom_once(self, file_path, page_offset):
         self.file_path = file_path
         logger.debug(f"Starting DOM build for: {file_path}")
@@ -47,6 +43,9 @@ class ZoneExtractor:
         # Initialize processors
         pdf_processor = PDFProcessor()
         yolo_processor = YOLODetectionProcessor(self.model_path)
+
+        # Load PDF document
+        pdf_document = fitz.open(self.file_path)
 
         # Convert PDF to images
         image_paths = pdf_processor.pdf_to_images(self.file_path, output_dir)
@@ -60,60 +59,64 @@ class ZoneExtractor:
             results, image, detections = yolo_processor.process_image(
                 image_path, self.conf_threshold, self.iou_threshold
             )
+
             if detections is not None:
-                json_data = yolo_processor.detections_to_json(detections, results, image.shape)
+                # Get PDF page (ensure this is before page size usage)
+                page = pdf_document[i]
+
+                json_data = yolo_processor.detections_to_json(
+                    detections,
+                    results,
+                    image.shape,
+                    pdf_page_size=(page.rect.width, page.rect.height)
+                )
                 json_data["page_number"] = i + 1
-                # json_data["page_info"] = {
-                #     "page_number": i + 1,
-                #     "image_path": image_path,
-                #     "original_pdf": self.file_path
-                # }
-                # # print("json_data++++++++++++++++++++ ",json_data)
-
-
                 block_count = -1
                 current_page = None
                 current_page_zones = []
-                for idx, node in enumerate(json_data["detections"]):
+                zones = json_data["detections"]
+                # Sort zones by Y-coordinate descending (bottom first, top last)
+                zones.sort(key=lambda z: float(z["bbox"]["y1"]))
+                for idx, node in enumerate(zones):
                     logger.debug(f"Processing node {idx}")
                     try:
-                        # Adjust with page offset so all pages align with the full document
-                        page = int(json_data["page_number"]) - 1 + page_offset
+                        # Adjust page number with offset
+                        page_num = int(json_data["page_number"]) - 1 + page_offset
                     except Exception as e:
                         logger.warning(f"Node {idx} has invalid page value: {page} — {e}")
                         continue
+
                     bboxes = node.get("bbox")
                     x = bboxes['x1']
                     y = bboxes['y1']
                     width = node["width"]
-                    height = node['height']
+                    height = node["height"]
 
-                    converted_bbox = [x, y, width, height]
-                    bbox = converted_bbox
+                    bbox = [x, y, width, height]
                     if not bbox:
                         logger.debug(f"Node {idx} skipped: no bbox")
                         continue
 
-
-                    if current_page is not None and page != current_page:
+                    if current_page is not None and page_num != current_page:
                         if self.page_callback:
                             logger.debug(f"Page change detected: sending zones for page {current_page}")
                             self.page_callback(current_page, current_page_zones)
                         current_page_zones = []
-                        block_count = 0  # Reset block_count for the new page
-                    elif current_page is None:  # For the very first page
                         block_count = 0
-                    current_page = page
+                    elif current_page is None:
+                        block_count = 0
+
+                    current_page = page_num
                     block_count += 1
 
-                    block_id = f"pz{page+1}-{block_count}"
-                    span_id = f"z{page+1}-{block_count}"
+                    block_id = f"pz{page_num + 1}-{block_count}"
+                    span_id = f"z{page_num + 1}-{block_count}"
 
-
-                    confi_object = config_parser
-                    zone_string = confi_object.zones_type
-                    zone_list = json.loads(zone_string)
-                    color = next((item["color"] for item in zone_list if item["type"] == node["label"]), None)
+                    zone_list = json.loads(config_parser.zones_type)
+                    color = next(
+                        (item["color"] for item in zone_list if item["type"] == node["label"]),
+                        None
+                    )
 
                     zone_data = {
                         "block_id": block_id,
@@ -121,20 +124,20 @@ class ZoneExtractor:
                         "y": bboxes["y1"],
                         "width": node["width"],
                         "height": node["height"],
-                        "page": page,
+                        "page": page_num,
                         "text": "",
                         "font_size": "",
                         "size_class": "",
                         "line_count": "",
                         "bbox": bbox,
-                        "pg": page,
+                        "pg": page_num,
                         "span_id": span_id,
                         "label": node["label"],
                         "feats": "",
                         "type": node["label"],
                         "zone_color": color,
                         "action_type": "self",
-                        "zone_object":{}
+                        "zone_object": {}
                     }
                     self.all_zones.append(zone_data)
                     current_page_zones.append(zone_data)
@@ -142,7 +145,6 @@ class ZoneExtractor:
                 if current_page_zones and self.page_callback:
                     logger.debug(f"Final flush: sending zones for page {current_page}")
                     self.page_callback(current_page, current_page_zones)
-
 
     def extract_id_with_split(self,html_string):
         try:
@@ -192,35 +194,54 @@ class YOLODetectionProcessor:
             print(f"Error processing image: {e}")
             return None, None, None
 
-    def detections_to_json(self, detections, results, image_shape):
-        """Convert detections to JSON format"""
+    def detections_to_json(self, detections, results, image_shape, pdf_page_size=None):
+        """Convert detections to JSON format with optional scaling to PDF page size."""
         if detections is None or len(detections) == 0:
             return {"detections": [], "metadata": {"total_detections": 0}}
+
+        img_h, img_w = image_shape[:2]
+
+        if pdf_page_size:
+            pdf_w, pdf_h = pdf_page_size
+        else:
+            pdf_w, pdf_h = img_w, img_h  # default: no scaling
+
+        scale_x = pdf_w / img_w
+        scale_y = pdf_h / img_h
 
         json_detections = []
         class_names = self.model.names if self.model else {}
 
-        for i, (bbox, conf, class_id) in enumerate(zip(detections.xyxy, detections.confidence, detections.class_id)):
+        for i, (bbox, conf, class_id) in enumerate(
+                zip(detections.xyxy, detections.confidence, detections.class_id)
+        ):
             x1, y1, x2, y2 = bbox
+
+            # Scale to PDF size but keep image-origin Y
+            x1_scaled = float(x1) * scale_x
+            y1_scaled = float(y1) * scale_y
+            x2_scaled = float(x2) * scale_x
+            y2_scaled = float(y2) * scale_y
+
             detection = {
                 "id": i,
                 "bbox": {
-                    "x1": float(x1),
-                    "y1": float(y1),
-                    "x2": float(x2),
-                    "y2": float(y2)
+                    "x1": x1_scaled,
+                    "y1": y1_scaled,
+                    "x2": x2_scaled,
+                    "y2": y2_scaled
                 },
                 "confidence": float(conf),
                 "class_id": int(class_id),
                 "label": class_names.get(int(class_id), f"class_{int(class_id)}"),
-                "width": float(x2 - x1),
-                "height": float(y2 - y1),
-                "area": float((x2 - x1) * (y2 - y1))
+                "width": x2_scaled - x1_scaled,
+                "height": y2_scaled - y1_scaled,
+                "area": (x2_scaled - x1_scaled) * (y2_scaled - y1_scaled)
             }
             json_detections.append(detection)
 
         # Create metadata
-        unique_classes = list(set([det["label"] for det in json_detections]))
+        unique_classes = list(set(det["label"] for det in json_detections))
         class_counts = {cls: sum(1 for det in json_detections if det["label"] == cls) for cls in unique_classes}
 
         json_data = {
@@ -229,7 +250,11 @@ class YOLODetectionProcessor:
                 "total_detections": len(json_detections),
                 "unique_classes": unique_classes,
                 "class_counts": class_counts,
-                "image_shape": {"height": image_shape[0], "width": image_shape[1], "channels": image_shape[2]},
+                "image_shape": {
+                    "height": image_shape[0],
+                    "width": image_shape[1],
+                    "channels": image_shape[2] if len(image_shape) > 2 else None
+                },
                 "format": "xyxy",
                 "created_at": datetime.now().isoformat(),
                 "model_info": {
