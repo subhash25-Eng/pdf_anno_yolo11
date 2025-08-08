@@ -190,7 +190,6 @@ class PDFViewer(QMainWindow):
         # self.clear_temp_pdf_folder()
         if not file_path:
             return
-        # self.copy_pdf_to_temp(file_path)
         start_time = QTime.currentTime()
 
         self.loading_dialog = LoadingDialog("Extracting zones...", self)
@@ -229,39 +228,7 @@ class PDFViewer(QMainWindow):
             traceback.print_exc()
             QMessageBox.critical(self, "Error", f"Failed to open PDF:\n{str(e)}")
 
-    def clear_temp_pdf_folder(self,temp_folder='temp_pdf'):
-        if os.path.exists(temp_folder):
-            for file_name in os.listdir(temp_folder):
-                file_path = os.path.join(temp_folder, file_name)
-                try:
-                    if os.path.isfile(file_path):
-                        os.remove(file_path)
-                except Exception as e:
-                    print(f"Failed to delete {file_path}: {e}")
-        else:
-            os.makedirs(temp_folder)
-    def copy_pdf_to_temp(self,source_pdf_path, temp_folder='temp_pdf'):
-        try:
-            # Ensure source file exists
-            if not os.path.isfile(source_pdf_path):
-                raise FileNotFoundError(f"Source PDF not found: {source_pdf_path}")
 
-            # Create temp folder if it doesn't exist
-            os.makedirs(temp_folder, exist_ok=True)
-
-            # Construct destination path
-            file_name = os.path.basename(source_pdf_path)
-            destination_pdf_path = os.path.join(temp_folder, file_name)
-
-            # Copy the PDF file
-            shutil.copy2(source_pdf_path, destination_pdf_path)
-            print(f"PDF copied to: {destination_pdf_path}")
-
-            return destination_pdf_path
-
-        except Exception as e:
-            print(f"Error copying PDF: {e}")
-            return None
     def display_single_page(self, page_number, force_rerender=False):
         self.current_page = page_number
         self.scroll_area.setUpdatesEnabled(False)

@@ -298,7 +298,7 @@ class PdfUtils:
 
                 x = zone["x"] * zoom
                 # y = (page_height - zone["y"] - zone["height"]) * zoom
-                y = (zone["y"]) * zoom
+                y = zone["y"] * zoom
                 w = zone["width"] * zoom
                 h = zone["height"] * zoom
                 zone_color = zone.get("zone_color")

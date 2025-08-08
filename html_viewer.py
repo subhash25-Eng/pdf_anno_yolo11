@@ -171,8 +171,8 @@ class HtmlSourceViewer(QDialog):
                 content_str = escape(obj.get("text", "No Text"))
 
                 # Style
-                bold = obj.get("feats", {}).get("_N_font_is_bold", False)
-                italic = obj.get("feats", {}).get("_N_font_is_italic", False)
+                bold =  False
+                italic =  False
                 style_str = []
                 if bold:
                     style_str.append("font-weight: bold;")
@@ -180,7 +180,7 @@ class HtmlSourceViewer(QDialog):
                     style_str.append("font-style: italic;")
                 style_str = " ".join(style_str)
 
-                font_tag = f"""<font font-name="Auto" font-size="{obj.get("font_size", 10.0):.2f}pt" id="{span_id}-f" style="{style_str}">"""
+                font_tag = f"""<font font-name="Auto" font-size="{obj.get("font_size", 10.0)}pt" id="{span_id}-f" style="{style_str}">"""
                 wrapped_content = content_str
                 if bold and italic:
                     wrapped_content = f"<b><i>{content_str}</i></b>"
