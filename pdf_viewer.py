@@ -1,8 +1,5 @@
-import shutil
 import sys
 from PyQt5 import sip
-from charset_normalizer.md import annotations
-
 from loading_class import LoadingDialog
 from pdf_utils import FastRenderTask
 from setup_ui import setup_menu_bar, setup_main_layout
@@ -746,11 +743,19 @@ class PDFViewer(QMainWindow):
                 bbox = item['bbox']
             else:
                 continue
-            objects.append({"bbox":bbox,"label":item.get("type", ""),"page":item.get("page")+1})
+            objects.append({
+                "bbox": bbox,
+                "label": "paragraph",
+                "page": item.get("page", 0) + 1,
+                "text": item.get("text", ""),
+                "reading_order": 1
+            })
+
+        annotations["id"] = f"{name_without_ext}_{self.current_page + 1}"
         annotations["image_width"] = image_data["width"]
         annotations["image_height"] = image_data["height"]
         annotations["image_path"] = image_data["image_path"]
-        annotations["annotations"] = objects
+        annotations["paragraphs"] = objects
 
         # train_data.append(train_object)
         # Save the train data

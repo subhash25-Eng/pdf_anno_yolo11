@@ -289,8 +289,8 @@ class PdfUtils:
             page_height = page.rect.height
             zoom = used_zoom
 
-            if any("sequence_number" in z for z in zones):
-                zones = sorted(zones, key=lambda z: z.get("sequence_number", 0))
+            # if any("sequence_number" in z for z in zones):
+            #     zones = sorted(zones, key=lambda z: z.get("sequence_number", 0))
 
             for i, zone in enumerate(zones):
 
@@ -305,12 +305,12 @@ class PdfUtils:
 
                 if re_arranged_sequence:
                     sequence_number = i + 1
-                    zone["sequence_number"] = sequence_number
+                    # zone["sequence_number"] = sequence_number
                 else:
                     sequence_number = zone.get("sequence_number")
                     if sequence_number is None:
                         sequence_number = i + 1
-                        zone["sequence_number"] = sequence_number
+                        # zone["sequence_number"] = sequence_number
 
 
                 if "block_id" not in zone:
