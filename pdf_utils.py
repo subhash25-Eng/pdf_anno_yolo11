@@ -116,7 +116,6 @@ class FastRenderTask(QRunnable):
                 colorspace=colorspace,
                 annots=True
             )
-            print("image pix ++++++ ",pix)
             # Fast QImage conversion
             fmt = QImage.Format_RGB888
             img = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt).copy()

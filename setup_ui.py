@@ -42,10 +42,10 @@ def setup_menu_bar(main_window):
     zone_shortcut = QShortcut(QKeySequence("Z"), main_window)
     zone_shortcut.activated.connect(main_window.toggle_creation_mode)
 
-    undo_action = QAction("Undo", main_window)
-    undo_action.setShortcut("Ctrl+Z")
-    undo_action.triggered.connect(main_window.undo_last_action)
-    edit_menu.addAction(undo_action)
+    # undo_action = QAction("Undo", main_window)
+    # undo_action.setShortcut("Ctrl+Z")
+    # undo_action.triggered.connect(main_window.undo_last_action)
+    # edit_menu.addAction(undo_action)
 
     # View menu
     view_menu = menu_bar.addMenu("View")
@@ -68,10 +68,10 @@ def setup_menu_bar(main_window):
     shortcuts_action.triggered.connect(lambda: show_shortcuts_dialog(main_window))
     help_menu.addAction(shortcuts_action)
 
-    toggle_sequence_action = QAction("Hide Sequence Circle", main_window)
-    toggle_sequence_action.triggered.connect(main_window.toggle_sequence_circles)
-    menu_bar.addAction(toggle_sequence_action)
-    main_window.toggle_sequence_action = toggle_sequence_action
+    # toggle_sequence_action = QAction("Hide Sequence Circle", main_window)
+    # toggle_sequence_action.triggered.connect(main_window.toggle_sequence_circles)
+    # menu_bar.addAction(toggle_sequence_action)
+    # main_window.toggle_sequence_action = toggle_sequence_action
 
     # Direct Exit menu item
     exit_action = QAction("Exit", main_window)
