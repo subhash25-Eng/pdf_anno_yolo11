@@ -272,7 +272,6 @@ class PdfUtils:
             if not scene:
                 scene = self.pdf_viewer.active_scenes.get(page_number)
 
-
             for item in list(scene.items()):
                 if isinstance(item, ResizableZone) or isinstance(item, QGraphicsItemGroup):
                     scene.removeItem(item)

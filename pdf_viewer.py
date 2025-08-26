@@ -74,7 +74,7 @@ class PDFViewer(QMainWindow):
         self.priority_timer.setSingleShot(True)
         self.priority_timer.timeout.connect(self.load_priority_pages)
         self.pdf_utils_obj = PdfUtils(self)
-        self.xml_source_viewer_obj = XMLSourceViewer(self)
+        # self.xml_source_viewer_obj = XMLSourceViewer(self)
         self.shortcut_manager = ZoneShortcutManager(self)
         # Memory management timer
         self.memory_timer = QTimer()

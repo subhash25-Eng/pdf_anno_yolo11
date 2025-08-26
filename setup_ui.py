@@ -39,8 +39,8 @@ def setup_menu_bar(main_window):
     # main_window.create_zone_action.triggered.connect(main_window.toggle_creation_mode)
     # edit_menu.addAction(main_window.create_zone_action)
 
-    zone_shortcut = QShortcut(QKeySequence("Z"), main_window)
-    zone_shortcut.activated.connect(main_window.toggle_creation_mode)
+    # zone_shortcut = QShortcut(QKeySequence("Z"), main_window)
+    # zone_shortcut.activated.connect(main_window.toggle_creation_mode)
 
     # undo_action = QAction("Undo", main_window)
     # undo_action.setShortcut("Ctrl+Z")
@@ -57,9 +57,9 @@ def setup_menu_bar(main_window):
     html_source_action.triggered.connect(main_window.show_html_source_viewer)
     view_menu.addAction(html_source_action)
 
-    xml_source_action = QAction("XML Source", main_window)
-    xml_source_action.triggered.connect(main_window.show_xml_editor)  # Direct connection
-    view_menu.addAction(xml_source_action)
+    # xml_source_action = QAction("XML Source", main_window)
+    # xml_source_action.triggered.connect(main_window.show_xml_editor)  # Direct connection
+    # view_menu.addAction(xml_source_action)
 
     # Help menu
     help_menu = menu_bar.addMenu("Help")
@@ -68,10 +68,10 @@ def setup_menu_bar(main_window):
     shortcuts_action.triggered.connect(lambda: show_shortcuts_dialog(main_window))
     help_menu.addAction(shortcuts_action)
 
-    # toggle_sequence_action = QAction("Hide Sequence Circle", main_window)
-    # toggle_sequence_action.triggered.connect(main_window.toggle_sequence_circles)
-    # menu_bar.addAction(toggle_sequence_action)
-    # main_window.toggle_sequence_action = toggle_sequence_action
+    toggle_sequence_action = QAction("Hide Sequence Circle", main_window)
+    toggle_sequence_action.triggered.connect(main_window.toggle_sequence_circles)
+    menu_bar.addAction(toggle_sequence_action)
+    main_window.toggle_sequence_action = toggle_sequence_action
 
     # Direct Exit menu item
     exit_action = QAction("Exit", main_window)
@@ -170,7 +170,6 @@ def setup_main_layout(main_window):
     main_window.memory_info_label.setToolTip("Memory usage info")
     main_window.performance_label.setToolTip("App performance or state")
 
-    main_window.prev_btn.clicked.connect(main_window.go_to_previous_page)
     main_window.prev_btn.clicked.connect(main_window.go_to_previous_page)
     main_window.next_btn.clicked.connect(main_window.go_to_next_page)
     main_window.page_spinbox.valueChanged.connect(main_window.go_to_page)
