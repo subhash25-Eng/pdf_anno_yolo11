@@ -11,6 +11,13 @@ from surya.layout import LayoutPredictor
 
 from configParser import config_parser
 
+# NEW: concurrency utilities
+import threading
+import queue
+import time
+import itertools
+from dataclasses import field
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -22,6 +29,10 @@ class ExtractorConfig:
     batch_size: int = 8  # Surya micro-batch for multi-page PDFs
     overlap_iou_threshold: float = 0.05  # when matching spans to zone rects
     max_pages_in_memory: int = 64  # safety guard for extreme PDFs
+    # NEW: concurrency behavior — "queue" (serialize), "replace" (cancel running & flush pending), "drop_old" (drop older pending, keep newest)
+    concurrency_policy: str = "queue"
+    # NEW: allow >1 worker if you truly want parallelism (generally keep 1 for GPU/CPU safety)
+    max_concurrent_jobs: int = 1
 
 
 # -------------------------- utilities --------------------------
@@ -49,6 +60,22 @@ def _iou(a: fitz.Rect, b: fitz.Rect) -> float:
     return inter.get_area() / (a.get_area() + b.get_area() - inter.get_area())
 
 
+# -------------------------- predictor singleton --------------------------
+class _LayoutPredictorSingleton:
+    _lock = threading.Lock()
+    _instance: Optional[LayoutPredictor] = None
+
+    @classmethod
+    def get(cls) -> LayoutPredictor:
+        # Lazily construct once, then reuse across all jobs
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    logger.debug("Instantiating global LayoutPredictor singleton…")
+                    cls._instance = LayoutPredictor()
+        return cls._instance
+
+
 # -------------------------- core classes --------------------------
 class ZoneExtractor:
     """
@@ -58,6 +85,8 @@ class ZoneExtractor:
       3) mapping each block back to PDF coordinates,
       4) extracting text + font info using a **per-page span cache**,
       5) streaming results via an optional page_callback.
+
+    Thread-safe for queued usage. Supports cooperative cancellation via `cancel_event`.
     """
 
     def __init__(
@@ -65,18 +94,24 @@ class ZoneExtractor:
         page_callback: Optional[Callable[[int, List[Dict]], None]] = None,
         page_offset: int = 0,
         config: Optional[ExtractorConfig] = None,
+        cancel_event: Optional[threading.Event] = None,
+        shared_layout_predictor: Optional[LayoutPredictor] = None,
     ):
         self.page_callback = page_callback
         self.all_zones: List[Dict] = []
         self.file_path: Optional[str] = None
         self.page_offset = page_offset
         self.cfg = config or ExtractorConfig()
+        self.cancel_event = cancel_event or threading.Event()
 
         # Pre-parse zones configuration for better performance
         self.zone_colors = self._parse_zone_colors()
 
-        # Instantiate Surya predictor once
-        self.layout_predictor = LayoutPredictor()
+        # Use shared predictor (singleton) to avoid re-loading weights for every job
+        self.layout_predictor = shared_layout_predictor or _LayoutPredictorSingleton.get()
+
+        # Tag set by the manager when queued (for observability)
+        self.job_id: Optional[int] = None
 
     # -------------------------- helpers --------------------------
     def _parse_zone_colors(self) -> Dict[str, str]:
@@ -183,7 +218,7 @@ class ZoneExtractor:
     def build_dom_once(self, file_path: str, page_offset: int):
         self.file_path = file_path
         self.page_offset = page_offset
-        logger.debug(f"Starting DOM build for: {file_path}")
+        logger.debug(f"Starting DOM build for: {file_path} (job_id={self.job_id})")
 
         pdf_document: Optional[fitz.Document] = None
         try:
@@ -194,19 +229,33 @@ class ZoneExtractor:
             total_pages = pdf_document.page_count
             bs = max(1, self.cfg.batch_size)
             for start in range(0, total_pages, bs):
+                # Cooperative cancellation check between batches
+                if self.cancel_event.is_set():
+                    logger.info(f"Cancellation signaled — stopping job_id={self.job_id}")
+                    break
+
                 end = min(total_pages, start + bs)
                 images: List[Image.Image] = []
                 pages: List[fitz.Page] = []
                 for pno in range(start, end):
+                    if self.cancel_event.is_set():
+                        break
                     page = pdf_document[pno]
                     pages.append(page)
                     images.append(_pdf_page_to_pil(page, self.cfg.dpi))
+
+                if not images:
+                    break
 
                 # Run Surya once per micro-batch
                 layout_results = self.layout_predictor(images)
 
                 # Convert results page-by-page
                 for local_idx, layout_result in enumerate(layout_results):
+                    if self.cancel_event.is_set():
+                        logger.info(f"Cancellation during batch — stopping job_id={self.job_id}")
+                        break
+
                     page_idx = start + local_idx
                     page = pages[local_idx]
                     img_w, img_h = images[local_idx].size
@@ -329,7 +378,7 @@ class ZoneExtractor:
     # -------------------------- plumbing --------------------------
     def _flush_page_zones(self, page_num: int, zones: List[Dict]):
         if self.page_callback and zones:
-            logger.debug(f"Sending {len(zones)} zones for page {page_num}")
+            logger.debug(f"Sending {len(zones)} zones for page {page_num} (job_id={self.job_id})")
             self.page_callback(page_num, zones)
 
     # API kept for backward compat
@@ -351,9 +400,189 @@ class ZoneExtractor:
             return None, None
 
 
-# -------------------------- background task --------------------------
+# -------------------------- background job manager (NEW) --------------------------
+@dataclass
+class _QueuedJob:
+    file_path: str
+    on_finish: Optional[Callable[[Optional[ZoneExtractor]], None]]
+    on_page: Optional[Callable[[int, List[Dict]], None]]
+    page_offset: int
+    config: ExtractorConfig
+    job_id: int
+    cancel_event: threading.Event = field(default_factory=threading.Event)
+
+
+class ZoneExtractionManager:
+    """
+    A singleton queue that serializes OCR/layout jobs and reuses a single Surya LayoutPredictor.
+
+    Policies:
+      - queue (default): run jobs strictly FIFO
+      - replace: cancel current + clear pending, then run newest
+      - drop_old: drop older pending jobs, keep only the newest pending while current continues
+    """
+
+    _instance = None
+    _instance_lock = threading.Lock()
+
+    def __init__(self, max_workers: int = 1):
+        self._jobs: "queue.Queue[_QueuedJob]" = queue.Queue()
+        self._workers: List[threading.Thread] = []
+        self._shutdown = threading.Event()
+        self._max_workers = max(1, int(max_workers))
+        self._current_job_lock = threading.Lock()
+        self._current_job: Optional[_QueuedJob] = None
+        self._id_counter = itertools.count(1)
+
+        # Start worker threads
+        for i in range(self._max_workers):
+            t = threading.Thread(target=self._worker_loop, name=f"ZoneExtractorWorker-{i+1}", daemon=True)
+            t.start()
+            self._workers.append(t)
+
+    @classmethod
+    def instance(cls, max_workers: int = 1) -> "ZoneExtractionManager":
+        if cls._instance is None:
+            with cls._instance_lock:
+                if cls._instance is None:
+                    cls._instance = ZoneExtractionManager(max_workers=max_workers)
+        return cls._instance
+
+    # Public API
+    def submit(self, file_path: str, on_finish=None, on_page=None, page_offset: int = 0, config: Optional[ExtractorConfig] = None) -> int:
+        cfg = config or ExtractorConfig()
+        job_id = next(self._id_counter)
+        job = _QueuedJob(file_path=file_path, on_finish=on_finish, on_page=on_page, page_offset=page_offset, config=cfg, job_id=job_id)
+        policy = (cfg.concurrency_policy or "queue").lower()
+
+        with self._current_job_lock:
+            if policy == "replace":
+                # cancel current and flush all pending
+                if self._current_job is not None:
+                    self._current_job.cancel_event.set()
+                self._flush_pending_jobs()
+                self._jobs.put(job)
+            elif policy == "drop_old":
+                # keep current running, replace ALL pending with just this new job
+                self._flush_pending_jobs()
+                self._jobs.put(job)
+            else:  # queue
+                self._jobs.put(job)
+
+        logger.info(f"Queued extraction job_id={job_id} policy={policy} file={file_path}")
+        return job_id
+
+    def cancel(self, job_id: int) -> bool:
+        with self._current_job_lock:
+            # Try to cancel current
+            if self._current_job and self._current_job.job_id == job_id:
+                self._current_job.cancel_event.set()
+                return True
+            # Else, rebuild queue skipping the job
+            new_q: "queue.Queue[_QueuedJob]" = queue.Queue()
+            canceled = False
+            while not self._jobs.empty():
+                item = self._jobs.get_nowait()
+                if item.job_id == job_id:
+                    item.cancel_event.set()
+                    canceled = True
+                    continue
+                new_q.put(item)
+            self._jobs = new_q
+            return canceled
+
+    def cancel_all_pending(self):
+        with self._current_job_lock:
+            self._flush_pending_jobs()
+
+    def shutdown(self):
+        self._shutdown.set()
+        with self._current_job_lock:
+            if self._current_job:
+                self._current_job.cancel_event.set()
+        # Put sentinels to release workers
+        for _ in self._workers:
+            self._jobs.put(None)  # type: ignore
+        for t in self._workers:
+            t.join(timeout=1.0)
+
+    # Internals
+    def _flush_pending_jobs(self):
+        # drain queue and cancel each job
+        temp: List[_QueuedJob] = []
+        while not self._jobs.empty():
+            try:
+                item = self._jobs.get_nowait()
+                if item is None:
+                    continue
+                item.cancel_event.set()
+                temp.append(item)
+            except queue.Empty:
+                break
+        # Do not requeue them
+        logger.debug(f"Flushed {len(temp)} pending job(s)")
+
+    def _worker_loop(self):
+        predictor = _LayoutPredictorSingleton.get()
+        while not self._shutdown.is_set():
+            try:
+                job = self._jobs.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if job is None:  # sentinel
+                break
+
+            with self._current_job_lock:
+                self._current_job = job
+
+            if job.cancel_event.is_set():
+                logger.info(f"Skipping canceled job_id={job.job_id}")
+                self._finish(job, None)
+                continue
+
+            logger.info(f"Starting job_id={job.job_id} file={job.file_path}")
+            extractor: Optional[ZoneExtractor] = None
+            try:
+                extractor = ZoneExtractor(
+                    page_callback=job.on_page,
+                    page_offset=job.page_offset,
+                    config=job.config,
+                    cancel_event=job.cancel_event,
+                    shared_layout_predictor=predictor,
+                )
+                extractor.job_id = job.job_id
+                extractor.build_dom_once(job.file_path, job.page_offset)
+                if job.cancel_event.is_set():
+                    logger.info(f"Job canceled during processing job_id={job.job_id}")
+            except FileNotFoundError as e:
+                logger.error(f"File not found: {job.file_path} - {e}")
+                extractor = None
+            except PermissionError as e:
+                logger.error(f"Permission denied: {job.file_path} - {e}")
+                extractor = None
+            except Exception as e:
+                logger.exception(f"Unexpected error during zone extraction (job_id={job.job_id}): {e}")
+                extractor = None
+            finally:
+                self._finish(job, extractor)
+                with self._current_job_lock:
+                    self._current_job = None
+
+    def _finish(self, job: _QueuedJob, extractor: Optional[ZoneExtractor]):
+        try:
+            if job.on_finish:
+                job.on_finish(extractor)
+        except Exception:
+            logger.exception("on_finish callback raised an exception")
+
+
+# -------------------------- background task (Qt wrapper) --------------------------
 class BackgroundZoneExtractionTask(QRunnable):
-    """Background task wrapper to run ZoneExtractor without blocking the UI thread."""
+    """Background task wrapper to *queue* ZoneExtractor without blocking or overlapping the UI thread.
+
+    Prior behavior ran extraction inside `run()`. Now we hand off to the global manager so that
+    multiple user actions enqueue jobs safely according to the configured `concurrency_policy`.
+    """
 
     def __init__(self, file_path: str, on_finish=None, on_page=None, page_offset: int = 0, config: Optional[ExtractorConfig] = None):
         super().__init__()
@@ -362,27 +591,23 @@ class BackgroundZoneExtractionTask(QRunnable):
         self.on_page = on_page
         self.page_offset = page_offset
         self.config = config or ExtractorConfig()
+        self._submitted_job_id: Optional[int] = None
 
     def run(self):
-        extractor: Optional[ZoneExtractor] = None
-        try:
-            logger.info(f"Zone extraction started for: {self.file_path}")
-            extractor = ZoneExtractor(page_callback=self.on_page, page_offset=self.page_offset, config=self.config)
-            extractor.build_dom_once(self.file_path, self.page_offset)
-            logger.info(
-                f"Zone extraction completed successfully. Extracted {len(extractor.all_zones)} zones"
-            )
-            if self.on_finish:
-                self.on_finish(extractor)
-        except FileNotFoundError as e:
-            logger.error(f"File not found: {self.file_path} - {e}")
-            if self.on_finish:
-                self.on_finish(None)
-        except PermissionError as e:
-            logger.error(f"Permission denied: {self.file_path} - {e}")
-            if self.on_finish:
-                self.on_finish(None)
-        except Exception as e:
-            logger.exception(f"Unexpected error during zone extraction: {e}")
-            if self.on_finish:
-                self.on_finish(None)
+        # Submit to the singleton manager and return immediately; manager invokes callbacks later.
+        mgr = ZoneExtractionManager.instance(max_workers=self.config.max_concurrent_jobs)
+        self._submitted_job_id = mgr.submit(
+            file_path=self.file_path,
+            on_finish=self.on_finish,
+            on_page=self.on_page,
+            page_offset=self.page_offset,
+            config=self.config,
+        )
+        logger.info(f"BackgroundZoneExtractionTask enqueued job_id={self._submitted_job_id} for {self.file_path}")
+
+    # Optional convenience for UI code (to cancel this task if needed)
+    def cancel(self) -> bool:
+        if self._submitted_job_id is None:
+            return False
+        mgr = ZoneExtractionManager.instance()
+        return mgr.cancel(self._submitted_job_id)
