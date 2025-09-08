@@ -18,7 +18,7 @@ from html_viewer import HtmlSourceViewer
 from pdf_utils import PdfUtils
 from richtexteditor import RichTextEditor
 import os, json
-from xml_source_viewer import XMLSourceViewer
+# from xml_source_viewer import XMLSourceViewer
 from pathlib import Path
 
 class PDFViewer(QMainWindow):
